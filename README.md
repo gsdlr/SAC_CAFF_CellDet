@@ -1,2 +1,2 @@
-Official implementation of SAC and CAFF for cell detection
+Official implementation of SAC and CAFF for cell detection.
 
