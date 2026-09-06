@@ -632,7 +632,7 @@ def visualize_affinity_consistency(device, epoch, detector, teacher_detector,
 # =============================================结束可视化affinity_consistency=======================================
 
 # visualization for test result
-def visualization_test(dataset_name, imgs, gts, preds, DotM, DotM_pred, device, num=5, scale=100.0):
+def visualization_test(dataset_name, imgs, gts, preds, DotM, DotM_pred, device, num=5):
     """
     Visualize the Input, GT, Output (Prediction) and the detection results
     """
@@ -640,7 +640,9 @@ def visualization_test(dataset_name, imgs, gts, preds, DotM, DotM_pred, device, 
     imgs, gts, preds = imgs.to(device), gts.to(device), preds.to(device)
     DotM, DotM_pred = DotM.to(device), DotM_pred.to(device)
 
-    plt.figure(figsize=(10, 10))
+    # 动态调整画布大小，保证每行有足够的高度，防止上下两排贴在一起
+    plt.figure(figsize=(12, 3 * num))
+
     # number of samples to be visualized
     for i in range(num):
         row = num
@@ -651,87 +653,112 @@ def visualization_test(dataset_name, imgs, gts, preds, DotM, DotM_pred, device, 
         img_np = imgs[i].permute(1, 2, 0).cpu().numpy()
         img_np = 0.5 * img_np + 0.5  # 还原normalization
         plt.title('input')
-        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
-            plt.imshow(img_np[4:604, 4:604, :])
-        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            plt.imshow(img_np[5:155, 5:155, :])
-        else:
-            plt.imshow(img_np)
+
+        plt.imshow(img_np)
         plt.axis('off')
 
         # column two: ground truth
         plt.subplot(row, col, i * col + 2)
         gt_np = gts[i].permute(1, 2, 0).cpu().numpy()
-        gt_np = gt_np / scale  # 还原为真实量级
-        plt.title('ground truth: {}'.format(DotM[i].sum()))
-        # plt.title('DenM_pred: {}'.format(torch.round(gts[i].sum(), decimals=3)))  # 显示预测的密度图，以用于ablation中的画图
-        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
-            plt.imshow(gt_np[4:604, 4:604, :])
-        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            plt.imshow(gt_np[5:155, 5:155, :])
-        else:
-            plt.imshow(gt_np)
+        gt_np = gt_np  # 还原为真实量级
+        plt.title('ground truth: {}'.format(int(DotM[i].sum().item()))) # 显示真实计数
+
+        plt.imshow(gt_np)
         plt.axis('off')
 
         # column three: predition
         plt.subplot(row, col, i * col + 3)
         pred_np = preds[i].permute(1, 2, 0).detach().cpu().numpy()
-        pred_np = pred_np / scale  # 还原为真实量级
-        plt.title('prdiction: {}'.format(DotM_pred[i].sum()))
-        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
-            plt.imshow(pred_np[4:604, 4:604, :])
-        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            plt.imshow(pred_np[5:155, 5:155, :])
-        else:
-            plt.imshow(pred_np)
+        pred_np = pred_np  # 还原为真实量级
+        plt.title('prediction: {}'.format(int(DotM_pred[i].sum().item()))) # 显示预测计数
+
+        plt.imshow(pred_np)
         plt.axis('off')
 
-        # column four: detection result. Yellow dot is the annotation, while the green circle is the detection
+        # column four: detection result.
         img_det = imgs[i].permute(1, 2, 0).detach().cpu().numpy()  # permute将[c, h, w]转为[h, w, c]
-        img_det = cv2.cvtColor(img_det, cv2.COLOR_RGB2BGR)  # 先转换颜色通道，否是后面画的圆没办法显示，原因未知
-        coords = torch.nonzero(DotM[i].squeeze()).cpu().numpy()  # 经过pytorch处理之后，DotM[i]的shape是[c, h ,w],其中c=1
-        coords_pred = torch.nonzero(DotM_pred[i].squeeze()).cpu().numpy()
+        img_det = cv2.cvtColor(img_det, cv2.COLOR_RGB2BGR)  # 先转换颜色通道，否则后面画的圆没办法显示
+        coords = torch.nonzero(DotM[i].squeeze()).cpu().numpy()  # GT坐标
+        coords_pred = torch.nonzero(DotM_pred[i].squeeze()).cpu().numpy()  # 预测坐标
 
-        # 这里只要是为了可视化清晰，并不是按照ground truth region
-        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
-            radius = 8
+        # 半径设置 (仅保留 MBM 和 BCD)
+        if 'PanNuke' in dataset_name:
+            radius_val = 12
             thickness = 2
             radius_pred = 3
-        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            radius = 6
-            thickness = 1
-            radius_pred = 2
-        elif 'IMM' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            radius = 10
+        elif 'BCD' in dataset_name:
+            radius_val = 10
             thickness = 2
-            radius_pred = 3
-        elif 'BCD' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            radius = 10
-            thickness = 2
-            radius_pred = 3
+            radius_pred = 5
         else:
-            radius = 4
+            radius_val = 8
             thickness = 1
-            radius_pred = 2
+            radius_pred = 3
 
-        for coord in coords:
-            colour = (0, 1.0, 0)  # 颜色转成0~1的float格式，因为图片是这个格式的
-            cv2.circle(img_det, (coord[1], coord[0]), radius, colour, thickness)  #
-        for coord_pred in coords_pred:
-            colour = (0.102, 0.706, 1.000)
-            cv2.circle(img_det, (coord_pred[1], coord_pred[0]), radius_pred, colour, -1)
-            # cv2.rectangle(img_det, (coord_pred[1] - 10, coord_pred[0] - 10), (coord_pred[1] + 10, coord_pred[0] + 10), (0, 1.0, 1.0), 2)  # 画矩形（bounding box）
+        # 匈牙利算法匹配 TP, FP, FN
+        tp_preds = []
+        fp_preds = []
+        fn_gts = []
+
+        if len(coords) == 0:
+            # 如果没有GT，所有预测都是FP
+            fp_preds = coords_pred.tolist()
+        elif len(coords_pred) == 0:
+            # 如果没有预测，所有GT都是FN
+            fn_gts = coords.tolist()
+        else:
+            # 1. 计算距离矩阵 (注意：coords_pred 在前，所以 行=Pred, 列=GT)
+            dist_matrix = cdist(coords_pred, coords)
+            # 2. 使用布尔矩阵和自定义的匈牙利算法 (这行直接代替了你之前的 for 循环)
+            match_matrix = dist_matrix <= radius_val
+            _, assign = hungarian(match_matrix)
+
+            # 将坐标列表转换为 NumPy 数组，方便直接用索引批量提取
+            coords_np = np.array(coords)
+            coords_pred_np = np.array(coords_pred)
+
+            # 此时 assign 矩阵的形状是 (Pred数量, GT数量)
+
+            # 如果和为 1，说明这个 Pred 成功匹配 -> 正确 (TP)
+            tp_pred_index = np.where(assign.sum(1) == 1)[0]
+
+            # assign.sum(0) 是按列求和，代表每个 GT 匹配到了几个 Pred
+            # 如果和为 0，说明这个 GT 没匹配上 -> 漏检 (FN)
+            fn_gt_index = np.where(assign.sum(0) == 0)[0]
+
+            # assign.sum(1) 是按行求和，代表每个 Pred 匹配到了几个 GT
+            # 如果和为 0，说明这个 Pred 没匹配上 -> 误检 (FP)
+            fp_pred_index = np.where(assign.sum(1) == 0)[0]
+
+            # 根据前面算出来的索引（index），把具体的坐标值（x, y）
+            if len(coords_np) > 0:
+                fn_gts.extend(coords_np[fn_gt_index].tolist())
+
+            if len(coords_pred_np) > 0:
+                fp_preds.extend(coords_pred_np[fp_pred_index].tolist())
+                tp_preds.extend(coords_pred_np[tp_pred_index].tolist())
+
+        # 绘制 TP (绿点), FP (黄点), FN (蓝点)
+        color_tp = (0, 1.0, 0)  # 绿色
+        color_fp = (0, 1.0, 1.0)  # 黄色 (BGR)
+        color_fn = (0, 0, 1.0)  # 蓝色 (BGR)
+
+        for pt in tp_preds:
+            cv2.circle(img_det, (int(pt[1]), int(pt[0])), radius_pred, color_tp, -1)
+        for pt in fp_preds:
+            cv2.circle(img_det, (int(pt[1]), int(pt[0])), radius_pred, color_fp, -1)
+        for pt in fn_gts:
+            # FN是漏检的GT，这里用同样的点或者稍大的点表示
+            cv2.circle(img_det, (int(pt[1]), int(pt[0])), radius_pred, color_fn, -1)
+
         img_det = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)  # 将颜色通道还原到RGB，方便plt显示
         img_det = 0.5 * img_det + 0.5  # 还原normalization
         plt.subplot(row, col, i * col + 4)
-        plt.title('detection result')
-        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
-            plt.imshow(img_det[4:604, 4:604, :])
-        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
-            plt.imshow(img_det[5:155, 5:155, :])
-        else:
-            plt.imshow(img_det)
+        plt.title('detection result\n(TP:G, FP:Y, FN:B)')
+
+        plt.imshow(img_det)
         plt.axis('off')
 
-    # show the figure
+    # 增加 h_pad 确保行与行之间有足够的留白，不至于标题和图片重叠
+    plt.tight_layout(h_pad=2.0, w_pad=1.0)
     plt.show()
