@@ -1,0 +1,737 @@
+# -*- coding:utf-8 -*-
+"""
+Author：R
+Date：29-04-2026
+"""
+import torch
+import torch.nn.functional as F
+from tqdm import tqdm
+import numpy as np
+from utils.consistency import extract_agents
+import torch.nn as nn
+import math
+import os
+import cv2
+import matplotlib.pyplot as plt
+from torchmetrics import StructuralSimilarityIndexMeasure
+from local_eval.eval import local_metrics
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
+def visualize_predictions_train(device, epoch, detector, teacher_detector,
+                          vis_labeled_batch=None, vis_unlabeled_batch=None,
+                          scale=1.0, save_dir='./vis_debug',
+                          num_samples=9, samples_per_page=3):
+    os.makedirs(save_dir, exist_ok=True)
+    detector.eval()
+    teacher_detector.eval()
+
+    mean = np.array([0.5, 0.5, 0.5])
+    std = np.array([0.5, 0.5, 0.5])
+
+    def denorm(tensor_img):
+        img = tensor_img.cpu().numpy().transpose(1, 2, 0)
+        img = img * std + mean
+        return np.clip(img, 0, 1)
+
+    def to_heatmap(tensor_map):
+        return tensor_map.squeeze().cpu().numpy()
+
+    # =====================================================================
+    # 1) Labeled data
+    # =====================================================================
+    if vis_labeled_batch is None:
+        print('[Vis] No labeled batch provided, skipping labeled visualization.')
+    else:
+        with torch.no_grad():
+            imgs = vis_labeled_batch[0][:num_samples].to(device)
+            DotM = vis_labeled_batch[1][:num_samples].to(device)
+            IDistM = vis_labeled_batch[3][:num_samples].to(device)
+
+            IDistM_pred, _ = detector(imgs)
+
+            IDistM = IDistM / scale
+            IDistM_pred = IDistM_pred / scale
+
+            total_n = imgs.shape[0]
+            num_pages = math.ceil(total_n / samples_per_page)
+
+            for page in range(num_pages):
+                start_idx = page * samples_per_page
+                end_idx = min(start_idx + samples_per_page, total_n)
+                n = end_idx - start_idx
+
+                fig, axes = plt.subplots(n, 5, figsize=(25, 5 * n))
+                if n == 1:
+                    axes = axes[np.newaxis, :]
+
+                for row, i in enumerate(range(start_idx, end_idx)):
+                    axes[row, 0].imshow(denorm(imgs[i]))
+                    axes[row, 0].set_title('Input Image', fontsize=12)
+
+                    dot_map_np = DotM[i].squeeze().cpu().numpy()
+                    gt_count = dot_map_np.sum()
+                    dot_vis = np.ones_like(dot_map_np)
+                    dot_vis[dot_map_np > 0] = 0
+                    axes[row, 1].imshow(dot_vis, cmap='gray', vmin=0, vmax=1)
+                    axes[row, 1].set_title(f'Dot Map (count={int(gt_count)})', fontsize=12)
+                    axes[row, 1].set_xticks([])
+                    axes[row, 1].set_yticks([])
+                    for spine in axes[row, 1].spines.values():
+                        spine.set_visible(True)
+                        spine.set_edgecolor('#CCCCCC')
+                        spine.set_linewidth(0.5)
+
+                    gt_map = to_heatmap(IDistM[i])
+                    axes[row, 2].imshow(gt_map, cmap='jet')
+                    axes[row, 2].set_title(f'GT FADT (sum={gt_map.sum():.2f})', fontsize=12)
+
+                    pred_map = to_heatmap(IDistM_pred[i])
+                    axes[row, 3].imshow(pred_map, cmap='jet')
+                    axes[row, 3].set_title(f'Student Pred (sum={pred_map.sum():.2f})', fontsize=12)
+
+                    diff_labeled = np.abs(pred_map - gt_map)
+                    axes[row, 4].imshow(diff_labeled, cmap='hot')
+                    axes[row, 4].set_title(f'|Pred - GT| (MSE={np.mean(diff_labeled**2):.6f})', fontsize=12)
+
+                    for j, ax in enumerate(axes[row]):
+                        if j == 1:
+                            continue
+                        ax.axis('off')
+
+                fig.suptitle(f'Epoch {epoch} — Labeled Data [Page {page+1}/{num_pages}]',
+                             fontsize=16, fontweight='bold')
+                plt.tight_layout()
+                save_path = os.path.join(save_dir, f'epoch{epoch}_labeled_page{page}.png')
+                plt.savefig(save_path, dpi=150, bbox_inches='tight')
+                plt.close(fig)
+                print(f'[Vis] Labeled visualization saved to {save_path}')
+
+            print(f'[Vis Stats - Labeled] IDistM_pred  min={IDistM_pred.min():.6f}  max={IDistM_pred.max():.6f}  mean={IDistM_pred.mean():.6f}')
+            print(f'[Vis Stats - Labeled] IDistM (GT)  min={IDistM.min():.6f}  max={IDistM.max():.6f}  mean={IDistM.mean():.6f}')
+
+    # =====================================================================
+    # 2) Unlabeled data
+    # =====================================================================
+    if vis_unlabeled_batch is None:
+        print('[Vis] No unlabeled batch provided, skipping unlabeled visualization.')
+        detector.train()
+        return
+
+    with torch.no_grad():
+        img_weak = vis_unlabeled_batch[1][:num_samples].to(device)
+        img_strong = vis_unlabeled_batch[2][:num_samples].to(device)
+
+        teacher_pred, _ = teacher_detector(img_weak)
+        student_pred, _ = detector(img_strong)
+
+        teacher_pred = teacher_pred / scale
+        student_pred = student_pred / scale
+
+        total_n = img_weak.shape[0]
+        num_pages = math.ceil(total_n / samples_per_page)
+
+        for page in range(num_pages):
+            start_idx = page * samples_per_page
+            end_idx = min(start_idx + samples_per_page, total_n)
+            n = end_idx - start_idx
+
+            fig, axes = plt.subplots(n, 6, figsize=(30, 5 * n))
+            if n == 1:
+                axes = axes[np.newaxis, :]
+
+            for row, i in enumerate(range(start_idx, end_idx)):
+                axes[row, 0].imshow(denorm(img_weak[i]))
+                axes[row, 0].set_title('Weak Aug Image', fontsize=12)
+
+                axes[row, 1].imshow(denorm(img_strong[i]))
+                axes[row, 1].set_title('Strong Aug Image', fontsize=12)
+
+                t_map = to_heatmap(teacher_pred[i])
+                axes[row, 2].imshow(t_map, cmap='jet')
+                axes[row, 2].set_title(f'Teacher Pred (sum={t_map.sum():.2f})', fontsize=12)
+
+                s_map = to_heatmap(student_pred[i])
+                axes[row, 3].imshow(s_map, cmap='jet')
+                axes[row, 3].set_title(f'Student Pred (sum={s_map.sum():.2f})', fontsize=12)
+
+                diff = np.abs(s_map - t_map)
+                mse_val = np.mean(diff ** 2)
+                axes[row, 4].imshow(diff, cmap='hot')
+                axes[row, 4].set_title(f'|Student - Teacher| (MSE={mse_val:.6f})', fontsize=12)
+
+                axes[row, 5].hist(t_map.flatten(), bins=100, alpha=0.5, label='Teacher', color='blue')
+                axes[row, 5].hist(s_map.flatten(), bins=100, alpha=0.5, label='Student', color='red')
+                axes[row, 5].legend(fontsize=10)
+                axes[row, 5].set_title('Pixel Value Distribution', fontsize=12)
+                axes[row, 5].set_yscale('log')
+
+                for ax in axes[row, :5]:
+                    ax.axis('off')
+
+            fig.suptitle(f'Epoch {epoch} — Unlabeled Data [Page {page+1}/{num_pages}]',
+                         fontsize=16, fontweight='bold')
+            plt.tight_layout()
+            save_path = os.path.join(save_dir, f'epoch{epoch}_unlabeled_page{page}.png')
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print(f'[Vis] Unlabeled visualization saved to {save_path}')
+
+        print(f'[Vis Stats - Unlabeled] teacher_pred  min={teacher_pred.min():.6f}  max={teacher_pred.max():.6f}  mean={teacher_pred.mean():.6f}')
+        print(f'[Vis Stats - Unlabeled] student_pred  min={student_pred.min():.6f}  max={student_pred.max():.6f}  mean={student_pred.mean():.6f}')
+
+    detector.train()
+
+# =============================================可视化affinity_consistency=======================================
+def visualize_affinity_consistency(device, epoch, detector, teacher_detector,
+                                   vis_unlabeled_batch=None, num_agents=32, K_max_agents=16,
+                                   temperature=0.2, save_dir='./vis_affinity_consistency',
+                                   num_samples=2, num_agents_to_show=4,
+                                   num_points_to_show=5, scale=1.0):
+    """
+    可视化 Affinity Consistency 的核心内容。
+
+    图1 (per_agent): 对选定的前 num_agents_to_show 个 agent，每个 agent 一行：
+         Teacher P(agent|pixel) | Student P(agent|pixel) | Diff (T − S)
+
+    图2 (point_affinity): 选取代表性空间点，每个点一行：
+         左列: Teacher 柱状图 | 中列: Student 柱状图 | 右列: 该点处 KL 散度(差值柱状图+KL标注)
+
+    图3 (overview):
+            # Row 0 (三列): 原始图像 | 统计信息 | （留空）
+            # Row 1 (三列): Weak Aug | Teacher Pred (/scale) | Teacher Bottleneck Feature (L2 norm, min-max normed)
+            # Row 2 (三列): Strong Aug | Student Pred (/scale) | Student Bottleneck Feature (L2 norm, min-max normed)
+    """
+    if vis_unlabeled_batch is None:
+        print('[Vis-AC] No unlabeled batch provided, skipping affinity visualization.')
+        return
+
+    os.makedirs(save_dir, exist_ok=True)
+    detector.eval()
+    teacher_detector.eval()
+
+    # 反归一化参数
+    mean = np.array([0.5, 0.5, 0.5])
+    std = np.array([0.5, 0.5, 0.5])
+
+    def denorm(tensor_img):
+        """将归一化后的 [C,H,W] tensor 还原为 [H,W,C] numpy (0~1)"""
+        img = tensor_img.cpu().numpy().transpose(1, 2, 0)
+        img = img * std + mean
+        img = np.clip(img, 0, 1)
+        return img
+
+    def select_representative_points(pred_small, h, w, num_points=5):
+        """
+        基于 teacher 预测图选取代表性空间点:
+          - 最高密度点 (前景核心)
+          - 高密度点 (前景次核心)
+          - 中等密度点 (前景边缘)
+          - 低密度点 (弱前景/过渡区)
+          - 最低密度点 (背景)
+        """
+        flat = pred_small.flatten()
+        sorted_idx = np.argsort(flat)[::-1]  # 从大到小
+
+        total_pixels = h * w
+        percentiles = [0.01, 0.1, 0.3, 0.6, 0.95]
+        labels = ['FG-Core', 'FG-High', 'FG-Mid', 'Transition', 'Background']
+
+        points = []
+        for i in range(min(num_points, len(percentiles))):
+            idx_in_sorted = int(percentiles[i] * total_pixels)
+            idx_in_sorted = min(idx_in_sorted, total_pixels - 1)
+            flat_idx = sorted_idx[idx_in_sorted]
+            pi = flat_idx // w
+            pj = flat_idx % w
+            points.append((pi, pj, labels[i]))
+
+        return points
+
+    def kl_div_numpy(p, q, eps=1e-8):
+        """计算单个像素点处 Teacher 到 Student 的 KL 散度"""
+        p = np.clip(p, eps, 1.0)
+        q = np.clip(q, eps, 1.0)
+        return np.sum(p * np.log(p / q))
+
+    def hide_axis_keep_ylabel(ax):
+        """隐藏 ticks 和 spines，但保留 ylabel"""
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+
+    with torch.no_grad():
+        assert isinstance(vis_unlabeled_batch, (list, tuple)) and len(vis_unlabeled_batch) >= 3
+        img_raws = vis_unlabeled_batch[0]  # [B, 3, H, W], [0,1]
+        img_weak = vis_unlabeled_batch[1].to(device)  # [B, 3, H, W], normalized
+        img_strong = vis_unlabeled_batch[2].to(device)  # [B, 3, H, W], normalized
+
+        teacher_pred, teacher_feat = teacher_detector(img_weak)
+        student_pred, student_feat = detector(img_strong)
+
+        B, C, h, w = teacher_feat.shape
+
+        # 同时获取 agent 特征和位置
+        agents, agent_positions_batch = extract_agents(
+            teacher_pred, teacher_feat,
+            N=num_agents, K_max=K_max_agents,
+            tau_fg=0.25,
+            return_positions=True)
+        # agents: [B, C, N]
+        # agent_positions_batch: list of list of (r, c, type_str)
+
+        sample_count = 0
+
+        for b in range(B):
+            if sample_count >= num_samples:
+                break
+
+            t_feat = teacher_feat[b]  # [C, h, w]
+            s_feat = student_feat[b]  # [C, h, w]
+            ag = agents[b]            # [C, N]
+            N_total = ag.shape[1]
+            agent_positions = agent_positions_batch[b]  # list of (r, c, type_str)
+
+            # Flatten & L2 normalize
+            t_flat = F.normalize(t_feat.view(C, -1).permute(1, 0), dim=-1)  # [hw, C]
+            s_flat = F.normalize(s_feat.view(C, -1).permute(1, 0), dim=-1)  # [hw, C]
+            ag_norm = F.normalize(ag, dim=0)  # [C, N]
+
+            # 原始 logits (cosine / τ)
+            logits_t = torch.mm(t_flat, ag_norm) / temperature  # [hw, N]
+            logits_s = torch.mm(s_flat, ag_norm) / temperature  # [hw, N]
+
+            # Softmax 概率
+            prob_t = F.softmax(logits_t, dim=-1)  # [hw, N]
+            prob_s = F.softmax(logits_s, dim=-1)  # [hw, N]
+
+            # Reshape to spatial: [h, w, N]
+            prob_t_spatial = prob_t.view(h, w, N_total)
+            prob_s_spatial = prob_s.view(h, w, N_total)
+            diff_spatial = prob_t_spatial - prob_s_spatial
+
+            # 逐像素 KL 散度
+            log_prob_t = F.log_softmax(logits_t, dim=-1)
+            log_prob_s = F.log_softmax(logits_s, dim=-1)
+            kl_per_pixel = (prob_t * (log_prob_t - log_prob_s)).sum(dim=-1)  # [hw]
+            kl_map = kl_per_pixel.view(h, w)
+
+            # =============================================================
+            # 图1: Per-Agent Affinity Map
+            #   每个 agent 一行，3列 = Teacher | Student | Diff
+            # =============================================================
+            N_show = min(num_agents_to_show, N_total)
+
+            fig, axes = plt.subplots(N_show, 3, figsize=(15, 4 * N_show))
+            if N_show == 1:
+                axes = axes[np.newaxis, :]
+
+            for n in range(N_show):
+                t_map = prob_t_spatial[:, :, n].cpu().numpy()
+                s_map = prob_s_spatial[:, :, n].cpu().numpy()
+                d_map = diff_spatial[:, :, n].cpu().numpy()
+
+                vmin_shared = min(t_map.min(), s_map.min())
+                vmax_shared = max(t_map.max(), s_map.max())
+
+                im_t = axes[n, 0].imshow(t_map, cmap='jet', vmin=vmin_shared, vmax=vmax_shared)
+                # 左侧标注：agent 编号 + 类型 + 位置坐标
+                if n < len(agent_positions):
+                    ar, ac, atype = agent_positions[n]
+                    row_label = f'Agent {n}\n[{atype}]\n({ar},{ac})'
+                else:
+                    row_label = f'Agent {n}'
+                axes[n, 0].set_ylabel(row_label, fontsize=11, fontweight='bold',
+                                       rotation=0, labelpad=60, va='center')
+                if n == 0:
+                    axes[n, 0].set_title('Teacher P(agent|pixel)', fontsize=12)
+                hide_axis_keep_ylabel(axes[n, 0])
+                plt.colorbar(im_t, ax=axes[n, 0], fraction=0.046, pad=0.04)
+
+                im_s = axes[n, 1].imshow(s_map, cmap='jet', vmin=vmin_shared, vmax=vmax_shared)
+                if n == 0:
+                    axes[n, 1].set_title('Student P(agent|pixel)', fontsize=12)
+                axes[n, 1].axis('off')
+                plt.colorbar(im_s, ax=axes[n, 1], fraction=0.046, pad=0.04)
+
+                abs_max = max(abs(d_map.min()), abs(d_map.max())) + 1e-8
+                im_d = axes[n, 2].imshow(d_map, cmap='RdBu_r', vmin=-abs_max, vmax=abs_max)
+                if n == 0:
+                    axes[n, 2].set_title('Diff (T − S)', fontsize=12)
+                axes[n, 2].axis('off')
+                plt.colorbar(im_d, ax=axes[n, 2], fraction=0.046, pad=0.04)
+
+            # 整幅图标题
+            # fig.suptitle(
+            #     f'Epoch {epoch} — Per-Agent Spatial Affinity Map (Sample {sample_count})\n'
+            #     f'每行展示一个 Agent：Bottleneck 特征图中每个空间位置与该 Agent 的亲和度 P(agent|pixel)\n'
+            #     f'左: Teacher 亲和度 | 中: Student 亲和度 | 右: 差值 (T−S)，反映 Student 需要对齐的区域\n'
+            #     f'(τ={temperature}, N_agents={N_total}, feature_size={h}×{w})',
+            #     fontsize=12, fontweight='bold', y=0.995
+            # )
+
+            fig.suptitle(
+                f'Epoch {epoch} — Per-Agent Spatial Affinity Map (Sample {sample_count})\n'
+                f'Each row corresponds to one Agent: affinity P(agent|pixel) at every spatial location in bottleneck feature map\n'
+                f'Left: Teacher affinity | Mid: Student affinity | Right: Diff (T-S), highlighting regions where Student needs to align\n'
+                f'(tau={temperature}, N_agents={N_total}, feature_size={h}x{w})',
+                fontsize=12, fontweight='bold', y=0.99
+            )
+
+            plt.tight_layout(rect=[0.06, 0, 1, 0.96])
+            save_path = os.path.join(save_dir, f'epoch{epoch}_per_agent_sample{sample_count}.png')
+            plt.savefig(save_path, dpi=150, bbox_inches='tight')
+            plt.close(fig)
+            print(f'[Vis-AC] Per-agent affinity saved to {save_path}')
+
+            # =============================================================
+            # 图2: 代表性空间点的 Agent 分布对比
+            #   每个点一行，3列: Teacher柱状图 | Student柱状图 | KL散度(差值+标注)
+            # =============================================================
+            pred_map = teacher_pred[b]  # [1, H, W]
+            pred_small = F.interpolate(
+                pred_map.unsqueeze(0), size=(h, w),
+                mode='bilinear', align_corners=False
+            ).squeeze().cpu().numpy()  # [h, w]
+            pred_small = pred_small / scale
+
+            points = select_representative_points(pred_small, h, w, num_points=num_points_to_show)
+
+            fig2, axes2 = plt.subplots(num_points_to_show, 3, figsize=(20, 3.5 * num_points_to_show))
+            if num_points_to_show == 1:
+                axes2 = axes2[np.newaxis, :]
+
+            x_ticks = np.arange(N_total)
+
+            for idx, (pi, pj, label) in enumerate(points):
+                prob_t_point = prob_t_spatial[pi, pj, :].cpu().numpy()  # [N]
+                prob_s_point = prob_s_spatial[pi, pj, :].cpu().numpy()  # [N]
+                kl_val = kl_div_numpy(prob_t_point, prob_s_point)
+
+                y_max = min(1.0, max(prob_t_point.max(), prob_s_point.max()) * 1.3 + 0.05)
+
+                # 左侧标注：点编号 + 语义类型 + 坐标 + 预测值
+                row_label = f'P{idx}: {label}\n({pi},{pj})\npred={pred_small[pi, pj]:.3f}'
+                axes2[idx, 0].set_ylabel(row_label, fontsize=10, fontweight='bold',
+                                          rotation=0, labelpad=80, va='center')
+
+                # 左列: Teacher 柱状图
+                axes2[idx, 0].bar(x_ticks, prob_t_point, color='#2196F3', alpha=0.8)
+                if idx == num_points_to_show - 1:
+                    axes2[idx, 0].set_xlabel('Agent Index')
+                else:
+                    axes2[idx, 0].set_xlabel('')
+                axes2[idx, 0].set_title(
+                    f'Teacher P(agent|pixel)' if idx == 0 else '',
+                    fontsize=10
+                )
+                axes2[idx, 0].set_ylim(0, y_max)
+                if N_total <= 16:
+                    axes2[idx, 0].set_xticks(x_ticks)
+                else:
+                    axes2[idx, 0].set_xticks(x_ticks[::4])
+
+                # 中列: Student 柱状图
+                axes2[idx, 1].bar(x_ticks, prob_s_point, color='#FF9800', alpha=0.8)
+                if idx == num_points_to_show - 1:
+                    axes2[idx, 1].set_xlabel('Agent Index')
+                else:
+                    axes2[idx, 1].set_xlabel('')
+                axes2[idx, 1].set_title(
+                    f'Student P(agent|pixel)' if idx == 0 else '',
+                    fontsize=10
+                )
+                axes2[idx, 1].set_ylim(0, y_max)
+                if N_total <= 16:
+                    axes2[idx, 1].set_xticks(x_ticks)
+                else:
+                    axes2[idx, 1].set_xticks(x_ticks[::4])
+
+                # 右列: 差值柱状图 + KL 标注
+                diff_point = prob_t_point - prob_s_point
+                colors = ['#F44336' if d > 0 else '#4CAF50' for d in diff_point]
+                axes2[idx, 2].bar(x_ticks, diff_point, color=colors, alpha=0.8)
+                axes2[idx, 2].axhline(0, color='black', linewidth=0.5)
+                if idx == num_points_to_show - 1:
+                    axes2[idx, 2].set_xlabel('Agent Index')
+                else:
+                    axes2[idx, 2].set_xlabel('')
+                axes2[idx, 2].set_title(
+                    f'Diff (T−S) & KL Divergence' if idx == 0 else '',
+                    fontsize=10
+                )
+                axes2[idx, 2].text(
+                    0.95, 0.90, f'KL={kl_val:.4f}',
+                    transform=axes2[idx, 2].transAxes,
+                    fontsize=10, fontweight='bold', color='darkred',
+                    ha='right', va='top',
+                    bbox=dict(boxstyle='round,pad=0.3', fc='lightyellow', alpha=0.8)
+                )
+                abs_max_bar = max(abs(diff_point.min()), abs(diff_point.max())) + 0.05
+                axes2[idx, 2].set_ylim(-abs_max_bar, abs_max_bar)
+                if N_total <= 16:
+                    axes2[idx, 2].set_xticks(x_ticks)
+                else:
+                    axes2[idx, 2].set_xticks(x_ticks[::4])
+
+            # 整幅图标题
+            # fig2.suptitle(
+            #     f'Epoch {epoch} — Point-to-Agents Affinity Distribution (Sample {sample_count})\n'
+            #     f'每行展示一个代表性空间点：该点的 Bottleneck 特征与所有 {N_total} 个 Agent 的相似度分布\n'
+            #     f'左: Teacher 分布 | 中: Student 分布 | 右: 差值 (T−S) + KL散度，衡量 Teacher-Student 分布差异\n'
+            #     f'(τ={temperature}, N_agents={N_total}, 点按 Teacher 预测值从高到低选取)',
+            #     fontsize=11, fontweight='bold', y=0.995
+            # )
+
+            fig2.suptitle(
+                f'Epoch {epoch} — Point-to-Agents Affinity Distribution (Sample {sample_count})\n'
+                f'Each row shows one representative spatial point: similarity distribution between its bottleneck feature and all {N_total} agents\n'
+                f'Left: Teacher dist | Mid: Student dist | Right: Diff (T-S) + KL divergence, measuring Teacher-Student distribution gap\n'
+                f'(tau={temperature}, N_agents={N_total}, points selected in descending order of Teacher prediction value)',
+                fontsize=11, fontweight='bold', y=0.99
+            )
+
+            plt.tight_layout(rect=[0.08, 0, 1, 0.95])
+            save_path2 = os.path.join(save_dir, f'epoch{epoch}_point_affinity_sample{sample_count}.png')
+            plt.savefig(save_path2, dpi=150, bbox_inches='tight')
+            plt.close(fig2)
+            print(f'[Vis-AC] Point-agent affinity saved to {save_path2}')
+
+            # =============================================================
+            # 图3 :
+            # Row 0 (三列): 原始图像 | 统计信息 | （留空）
+            # Row 1 (三列): Weak Aug | Teacher Pred (/scale) | Teacher Bottleneck Feature
+            # Row 2 (三列): Strong Aug | Student Pred (/scale) | Student Bottleneck Feature
+            # =============================================================
+            import matplotlib.gridspec as gridspec
+
+            # 取出当前样本的原图（未增强，已对齐到16倍数）
+            img_raw_np = img_raws[b].numpy().transpose(1, 2, 0)  # [H, W, 3], [0,1]
+            img_h, img_w = img_raw_np.shape[0], img_raw_np.shape[1]
+
+            # Teacher/Student prediction at output resolution, divided by scale
+            t_pred_np = (teacher_pred[b] / scale).squeeze().cpu().numpy()
+            s_pred_np = (student_pred[b] / scale).squeeze().cpu().numpy()
+
+            # Teacher/Student bottleneck feature: L2 norm → min-max归一化到[0,1]
+            t_feat_l2 = torch.norm(t_feat, dim=0).cpu().numpy()
+            s_feat_l2 = torch.norm(s_feat, dim=0).cpu().numpy()
+            t_feat_vis = (t_feat_l2 - t_feat_l2.min()) / (t_feat_l2.max() - t_feat_l2.min() + 1e-8)
+            s_feat_vis = (s_feat_l2 - s_feat_l2.min()) / (s_feat_l2.max() - s_feat_l2.min() + 1e-8)
+
+            # Weak/Strong aug denorm
+            img_weak_np = denorm(img_weak[b])
+            img_strong_np = denorm(img_strong[b])
+
+            # 使用 3行×3列 GridSpec
+            fig3 = plt.figure(figsize=(18, 16))
+            gs = gridspec.GridSpec(3, 3, figure=fig3,
+                                   width_ratios=[1.0, 1.0, 1.0],
+                                   height_ratios=[1.0, 1.0, 1.0],
+                                   hspace=0.30, wspace=0.30)
+
+            # ========== Row 0 ==========
+            # Col 0: 原始图像（无增强，已对齐到16倍数）
+            ax_r0c0 = fig3.add_subplot(gs[0, 0])
+            ax_r0c0.imshow(img_raw_np)
+            ax_r0c0.set_title(
+                f'Original Image\n({img_w}x{img_h})',
+                fontsize=9, fontweight='bold', pad=8)
+            ax_r0c0.axis('off')
+
+            # Col 1: 统计信息
+            ax_r0c1 = fig3.add_subplot(gs[0, 1])
+            ax_r0c1.axis('off')
+            stats_text = (
+                f'--- Statistics ---\n'
+                f'Image size: {img_w}x{img_h}\n'
+                f'Feature size: {h}x{w}\n'
+                f'N_agents: {N_total}\n'
+                f'Temperature: {temperature}\n'
+                f'Scale: {scale}\n\n'
+                f'Teacher pred sum: {t_pred_np.sum():.2f}\n'
+                f'Teacher pred max: {t_pred_np.max():.4f}\n'
+                f'Student pred sum: {s_pred_np.sum():.2f}\n'
+                f'Student pred max: {s_pred_np.max():.4f}\n\n'
+                f'Teacher feat L2 mean(raw): {t_feat_l2.mean():.4f}\n'
+                f'Student feat L2 mean(raw): {s_feat_l2.mean():.4f}'
+            )
+            ax_r0c1.text(0.05, 0.95, stats_text, transform=ax_r0c1.transAxes,
+                         fontsize=9, fontfamily='monospace',
+                         verticalalignment='top',
+                         bbox=dict(boxstyle='round',
+                                   facecolor='lightyellow', alpha=0.8))
+
+            # Col 2: 留空
+            ax_r0c2 = fig3.add_subplot(gs[0, 2])
+            ax_r0c2.axis('off')
+
+            # ========== Row 1: Teacher Pipeline ==========
+            ax_r1c0 = fig3.add_subplot(gs[1, 0])
+            ax_r1c0.imshow(img_weak_np)
+            ax_r1c0.set_title('Weak Augmentation\n(Teacher Input)',
+                              fontsize=9, fontweight='bold')
+            ax_r1c0.axis('off')
+
+            ax_r1c1 = fig3.add_subplot(gs[1, 1])
+            im_tp = ax_r1c1.imshow(t_pred_np, cmap='jet')
+            plt.colorbar(im_tp, ax=ax_r1c1, fraction=0.046, pad=0.04)
+            ax_r1c1.set_title(f'Teacher Prediction\n(sum={t_pred_np.sum():.2f})',
+                              fontsize=9, fontweight='bold')
+            ax_r1c1.axis('off')
+
+            ax_r1c2 = fig3.add_subplot(gs[1, 2])
+            im_tf = ax_r1c2.imshow(t_feat_vis, cmap='viridis', vmin=0, vmax=1)
+            plt.colorbar(im_tf, ax=ax_r1c2, fraction=0.046, pad=0.04)
+            ax_r1c2.set_title(f'Teacher Bottleneck Feature\n(L2 norm, min-max normed, {h}x{w})',
+                              fontsize=9, fontweight='bold')
+            ax_r1c2.axis('off')
+
+            # ========== Row 2: Student Pipeline ==========
+            ax_r2c0 = fig3.add_subplot(gs[2, 0])
+            ax_r2c0.imshow(img_strong_np)
+            ax_r2c0.set_title('Strong Augmentation\n(Student Input)',
+                              fontsize=9, fontweight='bold')
+            ax_r2c0.axis('off')
+
+            ax_r2c1 = fig3.add_subplot(gs[2, 1])
+            im_sp = ax_r2c1.imshow(s_pred_np, cmap='jet')
+            plt.colorbar(im_sp, ax=ax_r2c1, fraction=0.046, pad=0.04)
+            ax_r2c1.set_title(f'Student Prediction\n(sum={s_pred_np.sum():.2f})',
+                              fontsize=9, fontweight='bold')
+            ax_r2c1.axis('off')
+
+            ax_r2c2 = fig3.add_subplot(gs[2, 2])
+            im_sf = ax_r2c2.imshow(s_feat_vis, cmap='viridis', vmin=0, vmax=1)
+            plt.colorbar(im_sf, ax=ax_r2c2, fraction=0.046, pad=0.04)
+            ax_r2c2.set_title(f'Student Bottleneck Feature\n(L2 norm, min-max normed, {h}x{w})',
+                              fontsize=9, fontweight='bold')
+            ax_r2c2.axis('off')
+
+            fig3.suptitle(
+                f'Epoch {epoch} — Affinity Consistency Overview (Sample {sample_count})\n'
+                f'Row 0: Original Image / Stats | '
+                f'Row 1: Teacher pipeline | Row 2: Student pipeline',
+                fontsize=12, fontweight='bold', y=0.98)
+
+            plt.tight_layout(rect=[0, 0, 1, 0.96])
+            save_path3 = os.path.join(save_dir, f'epoch{epoch}_overview_sample{sample_count}.png')
+            plt.savefig(save_path3, dpi=150, bbox_inches='tight')
+            plt.close(fig3)
+            print(f'[Vis-AC] Overview saved to {save_path3}')
+
+            # 打印数值统计
+            print(f'[Vis-AC Stats] prob_t  min={prob_t.min():.6f}  max={prob_t.max():.6f}  mean={prob_t.mean():.6f}')
+            print(f'[Vis-AC Stats] prob_s  min={prob_s.min():.6f}  max={prob_s.max():.6f}  mean={prob_s.mean():.6f}')
+            kl_np = kl_map.cpu().numpy()
+            print(f'[Vis-AC Stats] KL      min={kl_np.min():.6f}  max={kl_np.max():.6f}  mean={kl_np.mean():.6f}')
+
+            sample_count += 1
+
+    detector.train()
+# =============================================结束可视化affinity_consistency=======================================
+
+# visualization for test result
+def visualization_test(dataset_name, imgs, gts, preds, DotM, DotM_pred, device, num=5, scale=100.0):
+    """
+    Visualize the Input, GT, Output (Prediction) and the detection results
+    """
+
+    imgs, gts, preds = imgs.to(device), gts.to(device), preds.to(device)
+    DotM, DotM_pred = DotM.to(device), DotM_pred.to(device)
+
+    plt.figure(figsize=(10, 10))
+    # number of samples to be visualized
+    for i in range(num):
+        row = num
+        col = 4
+
+        # column one: input images
+        plt.subplot(row, col, i * col + 1)
+        img_np = imgs[i].permute(1, 2, 0).cpu().numpy()
+        img_np = 0.5 * img_np + 0.5  # 还原normalization
+        plt.title('input')
+        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
+            plt.imshow(img_np[4:604, 4:604, :])
+        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            plt.imshow(img_np[5:155, 5:155, :])
+        else:
+            plt.imshow(img_np)
+        plt.axis('off')
+
+        # column two: ground truth
+        plt.subplot(row, col, i * col + 2)
+        gt_np = gts[i].permute(1, 2, 0).cpu().numpy()
+        gt_np = gt_np / scale  # 还原为真实量级
+        plt.title('ground truth: {}'.format(DotM[i].sum()))
+        # plt.title('DenM_pred: {}'.format(torch.round(gts[i].sum(), decimals=3)))  # 显示预测的密度图，以用于ablation中的画图
+        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
+            plt.imshow(gt_np[4:604, 4:604, :])
+        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            plt.imshow(gt_np[5:155, 5:155, :])
+        else:
+            plt.imshow(gt_np)
+        plt.axis('off')
+
+        # column three: predition
+        plt.subplot(row, col, i * col + 3)
+        pred_np = preds[i].permute(1, 2, 0).detach().cpu().numpy()
+        pred_np = pred_np / scale  # 还原为真实量级
+        plt.title('prdiction: {}'.format(DotM_pred[i].sum()))
+        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
+            plt.imshow(pred_np[4:604, 4:604, :])
+        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            plt.imshow(pred_np[5:155, 5:155, :])
+        else:
+            plt.imshow(pred_np)
+        plt.axis('off')
+
+        # column four: detection result. Yellow dot is the annotation, while the green circle is the detection
+        img_det = imgs[i].permute(1, 2, 0).detach().cpu().numpy()  # permute将[c, h, w]转为[h, w, c]
+        img_det = cv2.cvtColor(img_det, cv2.COLOR_RGB2BGR)  # 先转换颜色通道，否是后面画的圆没办法显示，原因未知
+        coords = torch.nonzero(DotM[i].squeeze()).cpu().numpy()  # 经过pytorch处理之后，DotM[i]的shape是[c, h ,w],其中c=1
+        coords_pred = torch.nonzero(DotM_pred[i].squeeze()).cpu().numpy()
+
+        # 这里只要是为了可视化清晰，并不是按照ground truth region
+        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
+            radius = 8
+            thickness = 2
+            radius_pred = 3
+        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            radius = 6
+            thickness = 1
+            radius_pred = 2
+        elif 'IMM' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            radius = 10
+            thickness = 2
+            radius_pred = 3
+        elif 'BCD' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            radius = 10
+            thickness = 2
+            radius_pred = 3
+        else:
+            radius = 4
+            thickness = 1
+            radius_pred = 2
+
+        for coord in coords:
+            colour = (0, 1.0, 0)  # 颜色转成0~1的float格式，因为图片是这个格式的
+            cv2.circle(img_det, (coord[1], coord[0]), radius, colour, thickness)  #
+        for coord_pred in coords_pred:
+            colour = (0.102, 0.706, 1.000)
+            cv2.circle(img_det, (coord_pred[1], coord_pred[0]), radius_pred, colour, -1)
+            # cv2.rectangle(img_det, (coord_pred[1] - 10, coord_pred[0] - 10), (coord_pred[1] + 10, coord_pred[0] + 10), (0, 1.0, 1.0), 2)  # 画矩形（bounding box）
+        img_det = cv2.cvtColor(img_det, cv2.COLOR_BGR2RGB)  # 将颜色通道还原到RGB，方便plt显示
+        img_det = 0.5 * img_det + 0.5  # 还原normalization
+        plt.subplot(row, col, i * col + 4)
+        plt.title('detection result')
+        if 'MBM' in dataset_name:  # MBM数据集padding到608，可视化时候还原到600
+            plt.imshow(img_det[4:604, 4:604, :])
+        elif 'ADI' in dataset_name:  # ADI数据集padding到160，可视化时候还原150
+            plt.imshow(img_det[5:155, 5:155, :])
+        else:
+            plt.imshow(img_det)
+        plt.axis('off')
+
+    # show the figure
+    plt.show()
