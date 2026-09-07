@@ -6,7 +6,7 @@ Date：19-08-2022
 
 from utils.mydataset import Dataset
 from utils.visualization import visualization_test
-from local_eval.eval import local_metrics  # 引入定位指标计算
+from local_eval.eval import local_metrics
 import os
 import pandas as pd
 import numpy as np
@@ -81,10 +81,8 @@ if __name__ == '__main__':
     args = parser_args()
     os.environ['CUDA_VISIBLE_DEVICES'] = args.device.strip()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
+    seed = 3
     epoch = 'best'
-    seed = 1
-
     base_path = os.path.join(args.root, 'datasets', args.dataset)
     images_train = sorted(glob.glob(os.path.join(base_path, 'train', 'images', '*.png')))
     dot_maps_train = sorted(glob.glob(os.path.join(base_path, 'train', 'dot_maps', '*.npy')))
