@@ -1,2 +1,2 @@
-Official implementation of SAC and CAFF for cell detection.
+Implementation of SAC and CAFF for microscopic image analysis.
 
