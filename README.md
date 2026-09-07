@@ -1,2 +1,2 @@
-The implementation of the cell detection project.
+Official implementation of SAC and CAFF for cell detection.
 
