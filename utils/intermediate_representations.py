@@ -30,11 +30,10 @@ def visual_intermed_rep(dataset_name, imgs, DotMs, gts, DenMs, device, num=5):
     imgs, gts, DenMs, DotMs = imgs.to(device), gts.to(device), DenMs.to(device), DotMs.to(device)
 
     plt.figure(figsize=(10, 10))
-    # number of samples to be visualized
     for i in range(num):
         row = num
-        col = 4  # 不显示点图
-        # col = 2   # 只显示点图, 方便放大可视化
+        col = 4
+        # col = 2
 
         # column one: input images
         plt.subplot(row, col, i * col + 1)

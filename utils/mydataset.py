@@ -25,8 +25,8 @@ class Dataset(data.Dataset):
         self.dot_maps_paths = dot_maps_paths
         self.dataset = dataset
         self.mode = mode
-        self.scale = scale  # 缩放因子，缓解截断误差
-        self.vis = vis  # 将训练图片用于原理可视化时,不需要进行预处理,因为预处理有crop/翻转等
+        self.scale = scale
+        self.vis = vis
 
         self.transform = transforms.Compose([
             transforms.ToTensor(),
@@ -58,35 +58,16 @@ class Dataset(data.Dataset):
             image, dot_map = img_crop(image, dot_map)
             image, dot_map = data_preprocess(image, dot_map)
 
-        # 对MBM测试集的图片的尺寸pad到16的倍数(600x600->608x608)，防止模型下采后concat时出现图像大小不匹配
-        if 'MBM' in self.dataset:
-            if self.mode == 'test':
-                image = np.array(image)
-                image = np.pad(image, ((4, 4), (4, 4), (0, 0)), 'constant')  # 高维pad，在H和W上面pad左右各1个像素
-                dot_map = np.pad(dot_map, ((4, 4), (4, 4)), 'constant')
-
-        # 对PSU测试集的图片的尺寸pad到16的倍数(612x452->624x464)，防止模型下采后concat时出现图像大小不匹配
-        if 'PSU' in self.dataset:
-            if self.mode == 'test':
-                image = np.array(image)
-                image = np.pad(image, ((6, 6), (6, 6), (0, 0)), 'constant')  # 高维pad，在H和W上面pad左右各1个像素
-                dot_map = np.pad(dot_map, ((6, 6), (6, 6)), 'constant')
-
-        # ===========ground truth生成===============
         h, w = dot_map.shape
-        coords = np.argwhere(dot_map > 0)  # 细胞点坐标                          # 提前获取坐标
+        coords = np.argwhere(dot_map > 0)
 
-        # 保护：如果当前图/crop中没有任何标注点，直接返回全零图
         if len(coords) == 0:
             inv_dist_map = np.zeros((h, w), dtype=np.float32)
         else:
-            # 1. 构建距离变换的输入：细胞点位置为 0，背景为 255
             dist_input = np.ones((h, w), dtype=np.uint8) * 255
             for (r, c) in coords:
                 dist_input[r, c] = 0
-            # 2. 欧氏距离变换
             dist_map = cv2.distanceTransform(dist_input, cv2.DIST_L2, 0)
-            # 3. clip防止exp溢出
             dist_map = np.clip(dist_map, 0, 300)
             inv_dist_map = (1.0 / (0.0001 + np.exp(0.2 * dist_map))).astype(np.float32) * self.scale
 
@@ -106,18 +87,15 @@ class UnlabeledDataset(data.Dataset):
         self.imgs_paths = imgs_paths
         self.dataset = dataset
 
-        # 用于可视化的原图 transform：只 ToTensor，不做任何颜色变换或归一化
         self.raw_transform = transforms.Compose([
             transforms.ToTensor(),  # [0,255] → [0,1], HWC → CHW
         ])
 
-        # teacher 用的弱增强：只做归一化
         self.weak_transform = transforms.Compose([
             transforms.ToTensor(),
             transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))
         ])
 
-        # student 用的强增强：加更多扰动
         self.strong_transform = transforms.Compose([
             transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.4, hue=0.1),
             transforms.RandomGrayscale(p=0.1),
@@ -133,29 +111,23 @@ class UnlabeledDataset(data.Dataset):
         image = Image.open(self.imgs_paths[index]).convert('RGB')
         image = np.array(image)
 
-        # 将图像裁剪到最近的16的倍数（向下取整，最多去掉15像素边缘）
         h, w = image.shape[0], image.shape[1]
         new_h = (h // 16) * 16
         new_w = (w // 16) * 16
         image = image[:new_h, :new_w, :]
 
-        # 保存未增强的原图（用于可视化），此时已是16倍数尺寸
         img_raw = self.raw_transform(Image.fromarray(image))  # [3, new_h, new_w], [0,1]
 
-        # 随机翻转（两个版本共享同一个几何变换，只在颜色/噪声上不同）
         if random.random() > 0.5:
             image = np.fliplr(image).copy()
         if random.random() > 0.5:
             image = np.flipud(image).copy()
 
-        # 转成 PIL 给 torchvision transforms 用
         image_pil = Image.fromarray(image)
 
-        # 同一张图，两种不同的增强
         img_weak = self.weak_transform(image_pil)      # 给 teacher
         img_strong = self.strong_transform(image_pil)   # 给 student
 
-        # 返回 3 个元素：原图（可视化）、弱增强（teacher）、强增强（student）
         return img_raw, img_weak, img_strong
 
 def _get_crop_size(size, divisor=16):

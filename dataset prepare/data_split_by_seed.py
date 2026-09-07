@@ -9,10 +9,6 @@ import numpy as np
 import os
 import shutil
 
-"""
-采用与训练过程中相同的seed来划分数据集，便于post-processing: visualization, 计算每一张测试图片的Error等等
-"""
-
 
 def data_split_by_seed(dataset, root, seed, split):
     images_path = ''

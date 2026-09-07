@@ -10,24 +10,20 @@ import argparse
 from pathlib import Path
 
 
-# 收集图片的工具函数，避免重复代码
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
 
 
 def collect_images(directory):
-    """收集目录下所有图片文件，按名称排序返回"""
     directory = Path(directory)
     return sorted([f for f in directory.iterdir() if f.suffix.lower() in IMAGE_EXTENSIONS])
 
 
 def collect_dot_maps(directory):
-    """收集目录下所有 .npy 标注文件，按名称排序返回"""
     directory = Path(directory)
     return sorted([f for f in directory.iterdir() if f.suffix.lower() == ".npy"])
 
 
 def check_and_pair(images_dir, dot_maps_dir):
-    """检查图片与标注的数量一致性，返回配对列表"""
     image_files = collect_images(images_dir)
     dot_files = collect_dot_maps(dot_maps_dir)
 
@@ -49,7 +45,6 @@ def check_and_pair(images_dir, dot_maps_dir):
 
 
 def print_pair_preview(samples, tag=""):
-    """打印配对预览"""
     total = len(samples)
     print(f"\n{'=' * 60}")
     print(f"  {tag}配对预览（前5个 + 后5个），请确认是否正确：")
@@ -65,7 +60,6 @@ def print_pair_preview(samples, tag=""):
 
 
 def create_output_dirs(output_dir):
-    """创建统一的输出目录结构，返回目录字典"""
     dirs = {
         "train_labeled_img":   output_dir / "train" / "labeled" / "images",
         "train_labeled_dot":   output_dir / "train" / "labeled" / "dot_maps",
@@ -79,20 +73,17 @@ def create_output_dirs(output_dir):
 
 
 def transfer_labeled(sample_list, img_dir, dot_dir, transfer_fn):
-    """将配对样本（图片+标注）传输到目标目录"""
     for img_path, npy_path in sample_list:
         transfer_fn(str(img_path), str(img_dir / img_path.name))
         transfer_fn(str(npy_path), str(dot_dir / npy_path.name))
 
 
 def transfer_unlabeled(sample_list, img_dir, transfer_fn):
-    """将无标签样本（仅图片）传输到目标目录"""
     for img_path, _ in sample_list:
         transfer_fn(str(img_path), str(img_dir / img_path.name))
 
 
 def print_result(output_dir, n_labeled_train, n_unlabeled_train, n_test):
-    """打印最终目录结构"""
     print("\n生成的目录结构:")
     print(f"  {output_dir.name}/")
     print(f"  ├── train/")
@@ -106,20 +97,13 @@ def print_result(output_dir, n_labeled_train, n_unlabeled_train, n_test):
     print(f"      └── dot_maps/        ({n_test} 个)")
 
 
-# ⭐️ 检测数据集类型的函数
 def detect_dataset_type(root_dir):
-    """
-    自动检测数据集的目录结构类型：
-      - 'flat'     : 根目录下直接有 images/ 和 dot_maps/（如 VGG）
-      - 'presplit' : 根目录下已有 train/ 和 test/ 子目录（如 BCD）
-    """
     root_dir = Path(root_dir)
 
     has_train_test = (root_dir / "train").is_dir() and (root_dir / "test").is_dir()
     has_flat = (root_dir / "images").is_dir() and (root_dir / "dot_maps").is_dir()
 
     if has_train_test and has_flat:
-        # 两种都存在时优先认为是 presplit（BCD 那种），也可根据需要调整
         print("⚠️ 同时检测到 train/test 目录和 images/dot_maps 目录，优先按已划分(presplit)模式处理")
         return "presplit"
     elif has_train_test:
@@ -133,12 +117,7 @@ def detect_dataset_type(root_dir):
         )
 
 
-# ⭐️ 处理 flat 类型（如 VGG）
 def split_flat_dataset(root_dir, output_dir, train_ratio, labeled_ratio, seed, copy):
-    """
-    处理 flat 类型数据集（根目录下有 images/ 和 dot_maps/）
-    需要先划分 train/test，再在 train 内划分 labeled/unlabeled
-    """
     random.seed(seed)
     root_dir = Path(root_dir)
 
@@ -170,7 +149,6 @@ def split_flat_dataset(root_dir, output_dir, train_ratio, labeled_ratio, seed, c
     print(f"    └── 无标签                                  : {len(unlabeled_train)}")
     print(f"  测试集 (全部有标签)                            : {len(test_samples)}")
 
-    # 创建目录 & 传输
     dirs = create_output_dirs(output_dir)
     transfer_fn = shutil.copy2 if copy else shutil.move
     action_name = "复制" if copy else "移动"
@@ -184,12 +162,7 @@ def split_flat_dataset(root_dir, output_dir, train_ratio, labeled_ratio, seed, c
     print_result(output_dir, len(labeled_train), len(unlabeled_train), len(test_samples))
 
 
-# ⭐️ 处理 presplit 类型（如 BCD）
 def split_presplit_dataset(root_dir, output_dir, labeled_ratio, seed, copy):
-    """
-    处理 presplit 类型数据集（根目录下已有 train/ 和 test/）
-    test 保持不变，只对 train 内部划分 labeled/unlabeled
-    """
     random.seed(seed)
     root_dir = Path(root_dir)
 
@@ -198,7 +171,6 @@ def split_presplit_dataset(root_dir, output_dir, labeled_ratio, seed, copy):
     test_images_dir = root_dir / "test" / "images"
     test_dot_maps_dir = root_dir / "test" / "dot_maps"
 
-    # 检查目录是否存在
     for d in [train_images_dir, train_dot_maps_dir, test_images_dir, test_dot_maps_dir]:
         if not d.exists():
             raise FileNotFoundError(f"找不到目录: {d}")
@@ -212,7 +184,6 @@ def split_presplit_dataset(root_dir, output_dir, labeled_ratio, seed, copy):
     print(f"[presplit 模式] 训练集 {n_train} 个样本，测试集 {n_test} 个样本")
     print_pair_preview(train_samples, tag="训练集 ")
 
-    # 只对训练集做 labeled / unlabeled 划分
     random.shuffle(train_samples)
     n_labeled_train = max(1, int(n_train * labeled_ratio))
     labeled_train = train_samples[:n_labeled_train]
@@ -223,7 +194,6 @@ def split_presplit_dataset(root_dir, output_dir, labeled_ratio, seed, copy):
     print(f"    └── 无标签                                  : {len(unlabeled_train)}")
     print(f"  测试集 (不变，全部有标签)                      : {n_test}")
 
-    # 创建目录 & 传输
     dirs = create_output_dirs(output_dir)
     transfer_fn = shutil.copy2 if copy else shutil.move
     action_name = "复制" if copy else "移动"
@@ -237,7 +207,6 @@ def split_presplit_dataset(root_dir, output_dir, labeled_ratio, seed, copy):
     print_result(output_dir, len(labeled_train), len(unlabeled_train), n_test)
 
 
-# ⭐️ 根据自动检测结果分发到不同处理函数
 def split_dataset(
         root_dir,
         output_dir=None,
@@ -246,31 +215,9 @@ def split_dataset(
         seed=42,
         copy=True,
 ):
-    """
-    统一入口：自动检测数据集结构，分发到对应的划分逻辑。
 
-    - flat 类型 (如 VGG):  root_dir 下有 images/ + dot_maps/
-      → 先按 train_ratio 划 train/test，再按 labeled_ratio 划 labeled/unlabeled
-
-    - presplit 类型 (如 BCD):  root_dir 下有 train/ + test/（各含 images/ + dot_maps/）
-      → test 不动，只对 train 按 labeled_ratio 划 labeled/unlabeled
-      → train_ratio 参数被忽略
-
-    输出目录结构统一为:
-        output_dir/
-        ├── train/
-        │   ├── labeled/
-        │   │   ├── images/
-        │   │   └── dot_maps/
-        │   └── unlabeled/
-        │       └── images/
-        └── test/
-            ├── images/
-            └── dot_maps/
-    """
     root_dir = Path(root_dir).resolve()
 
-    # 默认输出目录名为 "_XX%" 格式（基于 labeled_ratio）
     if output_dir is None:
         percent_str = f"{int(labeled_ratio * 100)}%"
         output_dir = root_dir.parent / (root_dir.name + f"_{percent_str}")
@@ -280,7 +227,6 @@ def split_dataset(
     print(f"输入目录: {root_dir}")
     print(f"输出目录: {output_dir}\n")
 
-    # ⭐️ 自动检测数据集类型
     dataset_type = detect_dataset_type(root_dir)
     print(f"检测到数据集类型: {dataset_type}\n")
 
@@ -304,8 +250,8 @@ if __name__ == "__main__":
                         help="输出目录路径（默认为 数据集目录 + '_XX%%'，如 VGG_20%%）")
     parser.add_argument("--train_ratio", type=float, default=0.8,
                         help="训练集占总数据的比例，仅 flat 类型有效 (默认 0.8)")
-    parser.add_argument("--labeled_ratio", type=float, default=1,
-                        help="训练集中有标签数据的比例 (默认 0.5)")
+    parser.add_argument("--labeled_ratio", type=float, default=0.2,
+                        help="训练集中有标签数据的比例 (默认 0.2)")
     parser.add_argument("--seed", type=int, default=3,
                         help="随机种子 (默认 42)")
     parser.add_argument("--move", action="store_true",

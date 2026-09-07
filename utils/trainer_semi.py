@@ -44,24 +44,19 @@ class Trainer(object):
         if not os.path.exists(self.weight_path):
             os.makedirs(self.weight_path)
 
-    # ===================== 创建 teacher 模型 =====================
     @torch.no_grad()
     def _create_teacher(self, student):
-        """深拷贝 student 作为 teacher，并冻结梯度"""
         teacher = copy.deepcopy(student)
         for param in teacher.parameters():
             param.requires_grad = False
         return teacher
 
-    # ===================== 新增：EMA 更新 teacher =====================
     @torch.no_grad()
     def _update_teacher(self, teacher, student, ema_decay):
-        """用指数移动平均更新 teacher 的权重（包括 BN 的 running stats）"""
         for (name_t, param_t), (name_s, param_s) in zip(
                 teacher.state_dict().items(), student.state_dict().items()):
             param_t.copy_(ema_decay * param_t + (1.0 - ema_decay) * param_s)
 
-    # 用于搜索最佳超参组合
     def dosearch(self):
 
         file_path_summary = self.results_path + '/' + self.args.dataset + '_' + self.args.det_net + '_metrics_summary.xlsx'
@@ -78,7 +73,7 @@ class Trainer(object):
                 setting += 1
 
         writer = pd.ExcelWriter(file_path_summary, engine='openpyxl')
-        df_summary.to_excel(writer, sheet_name='summary', index=True)  # 将要加进来的数据写入writer
+        df_summary.to_excel(writer, sheet_name='summary', index=True)
         writer.close()
 
     def dotrain(self):
@@ -93,8 +88,7 @@ class Trainer(object):
                            + '_bs_{}'.format(bs[self.args.dataset]) + '_optim_{}'.format(self.args.optim) \
                            + '_lr_{}'.format(self.lr) + '_wd_{}'.format(self.wd) + '_random_seed.xlsx'
 
-        # 创建一个空的excel表,用于保存训练过程数据
-        df_record = pd.DataFrame()  # 只是一个圆括号的话说明创建的数据表是空的
+        df_record = pd.DataFrame()
         df_record.to_excel(file_path_train_record)
 
         df_metric = pd.DataFrame(columns=[
@@ -104,25 +98,22 @@ class Trainer(object):
 
         df_metric.to_excel(file_path_metrics)
 
-        df_seed = pd.DataFrame(columns=['random_seed'])  # 定义列表头
+        df_seed = pd.DataFrame(columns=['random_seed'])
         df_seed.to_excel(file_random_seed)
 
         for run in range(self.args.runs):
 
-            # ========================加载数据====================================
-            random_seed = run + 1  # 数据已预先划分，random_seed仅用于excel记录
+            random_seed = run + 1
 
             base_path = os.path.join(self.args.root, 'datasets', self.args.dataset)
 
-            # labeled train: train/labeled/images & train/labeled/dot_maps
             images_train = glob_images(os.path.join(base_path, 'train', 'labeled', 'images'))
             dot_maps_train = sorted(glob.glob(os.path.join(base_path, 'train', 'labeled', 'dot_maps', '*.npy')))
 
-            # test: test/images & test/dot_maps
             images_test = glob_images(os.path.join(base_path, 'test', 'images'))
             dot_maps_test = sorted(glob.glob(os.path.join(base_path, 'test', 'dot_maps', '*.npy')))
 
-            # 数量一致性校验
+
             assert len(images_train) == len(dot_maps_train), \
                 f"train/labeled 图片({len(images_train)})与标注({len(dot_maps_train)})数量不一致"
             assert len(images_test) == len(dot_maps_test), \
@@ -141,9 +132,6 @@ class Trainer(object):
             test_dl = data.DataLoader(test_ds, batch_size=bs[self.args.dataset],
                                       num_workers=self.args.num_workers, pin_memory=False)
 
-            # ============================================================
-            # 加载无标签数据: train/unlabeled/images
-            # ============================================================
             unlabeled_img_dir = os.path.join(base_path, 'train', 'unlabeled', 'images')
             unlabeled_images = glob_images(unlabeled_img_dir)
 
@@ -156,13 +144,12 @@ class Trainer(object):
             else:
                 print("警告: 未找到无标签图像，将仅使用有标签数据进行训练")
                 unlabeled_dl = None
-            # ============================================================
-            # ⭐️ 为当前 run 创建可视化目录（放在 logs 对应实验文件夹内）
+
             vis_dir = os.path.join(self.results_path, 'vis_debug', f'run_{run}')
             os.makedirs(vis_dir, exist_ok=True)
 
             detector = globals()[self.args.det_net]().to(self.device)
-            # ===================== 在 student 创建后立刻创建 teacher =====================
+
             teacher_detector = self._create_teacher(detector)
 
             optim_det = getattr(torch.optim, self.args.optim)(detector.parameters(), lr=self.lr, weight_decay=self.wd)
@@ -186,9 +173,9 @@ class Trainer(object):
             ap_test, ar_test, fm_test = [], [], []
 
             best_fm = 0
-            # 每次 run 重置 global_step（新的模型从头训练）
+
             global_step = 0
-            sup_only_epochs = 50  # 定义纯监督阶段长度
+            sup_only_epochs = 50
 
             print("**********run_{} of dataset_{} bs_{} optim_{} lr_{} weight_decay_{}**********".format(
                 run + 1,
@@ -199,16 +186,13 @@ class Trainer(object):
                 self.wd))
 
             for epoch in range(self.args.epochs):
-                # 在半监督阶段开始时，用当前 student 重建 teacher 并重置 global_step
                 if epoch == sup_only_epochs and unlabeled_dl is not None:
                     teacher_detector = self._create_teacher(detector)
                     global_step = 0
                     print(f"\n[Epoch {epoch}] ★ Teacher re-initialized from student. "
                           f"Semi-supervised training begins. global_step reset to 0.\n")
-                # 前 sup_only_epochs 个 epoch 传 unlabeled_dl=None（纯监督），之后传实际的 unlabeled_dl
                 use_unlabeled = unlabeled_dl if epoch >= sup_only_epochs else None
 
-                # ===== 接收 train_epoch 返回的 15 个值=====
                 loss_sup_epoch_train, loss_pc_epoch_train, loss_ac_epoch_train, MAE_epoch_train, STD_epoch_train, \
                     loss_sup_epoch_test, MAE_epoch_test, STD_epoch_test, \
                     ap_epoch_train, ar_epoch_train, fm_epoch_train, \
@@ -239,7 +223,6 @@ class Trainer(object):
                 ar_test.append(ar_epoch_test)
                 fm_test.append(fm_epoch_test)
 
-                # ===== 保存权重：以 best_fm 为准同时保存 student 和 teacher =====
                 detector_save = self.weight_path + '/' + self.args.dataset + '_' + self.args.det_net \
                                 + '_bs_{}'.format(bs[self.args.dataset]) + '_optim_{}'.format(self.args.optim) \
                                 + '_lr_{}'.format(self.lr) + '_wd_{}'.format(self.wd) + '_run_{}'.format(run + 1) \
@@ -250,7 +233,6 @@ class Trainer(object):
                                     + '_lr_{}'.format(self.lr) + '_wd_{}'.format(self.wd) + '_run_{}'.format(run + 1) \
                                     + '_best.pth'
 
-                # 以 F-measure 为主指标，模型保存
                 if fm_epoch_test > best_fm:
                     best_fm = fm_epoch_test
                     best_detector_wt = copy.deepcopy(detector.state_dict())
@@ -258,7 +240,6 @@ class Trainer(object):
                     best_teacher_wt_best = copy.deepcopy(teacher_detector.state_dict())
                     torch.save(best_teacher_wt_best, teacher_save_best)
 
-                # 保存特定 epoch 的权重
                 if epoch == 0 or epoch == 9 or epoch == 99 or epoch == 499 or epoch == 999:
                     detector_save_ep = self.weight_path + '/' + self.args.dataset + '_' + self.args.det_net \
                                        + '_bs_{}'.format(bs[self.args.dataset]) + '_optim_{}'.format(self.args.optim) \
@@ -276,7 +257,6 @@ class Trainer(object):
                     teacher_wt_ep = copy.deepcopy(teacher_detector.state_dict())
                     torch.save(teacher_wt_ep, teacher_save_ep)
 
-                # ===== 导出每一次实验的训练过程数据（包含 teacher 和 student 的 test 指标）=====
             output_excel = {
                 'epoch': epoch_list,
                 # -----Counting Performance (Train)-----
@@ -299,7 +279,6 @@ class Trainer(object):
             output.to_excel(writer, sheet_name='run_{}'.format(run + 1), index=False)
             writer.close()
 
-            # ===== 导出每一次训练的 performance（以 teacher 的 best fm 对应 epoch 为准）=====
             # Teacher best
             fm_t = max(fm_test)
             index_fm_t = fm_test.index(fm_t)
@@ -312,7 +291,6 @@ class Trainer(object):
                 mae_t, std_t, ap_t, ar_t, fm_t,
             ]
 
-            # 获取到所有数据后，计算 validation 中 metrics 的平均值
             if run == self.args.runs - 1:
                 avg_metric = []
                 for col in df_metric.columns:

@@ -19,7 +19,6 @@ args = None
 def parse_args():
     parser = argparse.ArgumentParser(description="Train")
 
-    # ..表示当前所处的文件夹上一级文件夹的绝对路径
     parser.add_argument('--root', default='.',
                         help="root dir")
 

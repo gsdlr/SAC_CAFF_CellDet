@@ -13,7 +13,7 @@ dataset split
 '''
 batch size
 '''
-bs = {'VGG_100%': 4, 'VGG_10%': 4, 'MBM': 2, 'UniCD_50%': 4, 'BCD_50%': 2, 'BCD_10%': 2, 'PSU': 2, 'IMM': 4}
+bs = {'VGG_100%': 8, 'VGG_10%': 8, 'MBM': 8, 'UniCD_50%': 8, 'BCD_50%': 8, 'BCD_10%': 8, 'PSU': 8, 'IMM': 8}
 
 """
 scale
@@ -24,10 +24,6 @@ scale = {'VGG_semi': 100.0, 'VGG_10%': 100.0,
          'PanNuke_10%': 100.0, 'PanNuke_20%': 100.0, 'PanNuke_30%': 100.0, 'PanNuke_50%': 100.0, 'PanNuke_100%': 100.0,
          }
 
-'''
-When the distance between the given predicted point pred_p and ground truth point gt_p is less than a distance threshold r, 
-it means the pred_p and gt_p are successfully matched. The threshold r is related to real cell size. 
-'''
 radius = {
             'S': {'VGG_semi': 4, 'VGG_10%': 4, 'IMM': 8,
                   'UniCD_10%': 8, 'UniCD_20%': 8, 'UniCD_30%': 8, 'UniCD_50%': 8, 'UniCD_100%': 8,
